@@ -855,6 +855,16 @@ body::before {
 <!-- ============================================================
      WRAPPER PRINCIPAL
      ============================================================ -->
+<!-- Barra de diagnóstico — some quando o dashboard carrega -->
+<div id="debug-bar" style="
+  position:fixed;top:0;left:0;right:0;z-index:9999;
+  background:#1e293b;color:#94a3b8;font-family:monospace;
+  font-size:12px;padding:6px 16px;border-bottom:1px solid #334155;
+  display:block;">
+  Iniciando dashboard...
+</div>
+<div style="height:0" id="debug-spacer"></div>
+
 <div class="app-wrapper">
 
   <!-- ========================
@@ -1097,77 +1107,100 @@ let filteredData = [];
 /* ============================================================
    PONTO DE ENTRADA — carrega ao iniciar e no botão Atualizar
    ============================================================ */
+function setDebug(msg) {
+  var el = document.getElementById('debug-bar');
+  if (el) el.textContent = msg;
+  console.log('[Dashboard]', msg);
+}
+
 async function loadData() {
-  const btn = document.getElementById('btn-refresh');
-  btn.classList.add('loading');
+  var btn = document.getElementById('btn-refresh');
+  if (btn) btn.classList.add('loading');
   showState('loading');
+  setDebug('Iniciando carregamento de dados...');
 
-  const bust = `&cachebust=${Date.now()}`;
-  const directUrl = CSV_URL + bust;
+  var bust = '&cachebust=' + Date.now();
+  var directUrl = CSV_URL + bust;
 
-  // Tenta primeiro direto (funciona quando está publicado como CSV no Sheets)
-  // Depois tenta cada proxy CORS em sequência
-  const attempts = [
-    () => fetchDirect(directUrl),
-    ...PROXIES.map(proxy => () => fetchViaProxy(proxy(directUrl)))
+  var attempts = [
+    { label: 'direto',          fn: function() { return fetchDirect(directUrl); } },
+    { label: 'corsproxy.io',    fn: function() { return fetchViaProxy('https://corsproxy.io/?' + encodeURIComponent(directUrl)); } },
+    { label: 'allorigins.win',  fn: function() { return fetchViaProxy('https://api.allorigins.win/raw?url=' + encodeURIComponent(directUrl)); } },
+    { label: 'cors-anywhere',   fn: function() { return fetchViaProxy('https://cors-anywhere.herokuapp.com/' + directUrl); } },
   ];
 
-  let lastErr = null;
-  for (const attempt of attempts) {
+  var lastErr = null;
+
+  for (var i = 0; i < attempts.length; i++) {
+    var att = attempts[i];
+    setDebug('Tentando método ' + (i+1) + '/4: ' + att.label + '...');
     try {
-      const text = await attempt();
-      if (!text || text.trim().length < 10) continue;
+      var text = await att.fn();
 
-      // Verifica se veio HTML de login (planilha privada) em vez de CSV
-      if (text.trim().startsWith('<!DOCTYPE') || text.trim().startsWith('<html')) {
-        lastErr = new Error('A planilha está privada. Publique-a em: Arquivo → Compartilhar → Publicar na Web → CSV.');
+      if (!text || text.trim().length < 10) {
+        lastErr = new Error('Resposta vazia via ' + att.label);
         continue;
       }
 
+      var trimmed = text.trim();
+      if (trimmed.startsWith('<!DOCTYPE') || trimmed.startsWith('<html') || trimmed.startsWith('<HTML')) {
+        lastErr = new Error('Planilha privada — retornou página HTML de login.');
+        setDebug('⚠ ' + att.label + ': planilha privada, tentando próximo...');
+        continue;
+      }
+
+      setDebug('✓ Dados recebidos via ' + att.label + ' — processando...');
       rawData = parseCSV(text);
+
       if (rawData.length === 0) {
-        lastErr = new Error('Nenhum dado válido encontrado. Verifique se a aba correta está publicada.');
+        lastErr = new Error('CSV sem dados válidos via ' + att.label);
         continue;
       }
 
+      setDebug('✓ ' + rawData.length + ' registros carregados — renderizando dashboard...');
       populateFilters();
       applyFilters();
       showState('dashboard');
       updateTimestamp();
-      btn.classList.remove('loading');
-      return; // sucesso!
+      if (btn) btn.classList.remove('loading');
+      return;
 
     } catch (err) {
       lastErr = err;
-      // tenta próximo
+      setDebug('✗ ' + att.label + ' falhou: ' + err.message);
     }
   }
 
   // Todos falharam
-  console.error('Todos os métodos de carregamento falharam:', lastErr);
-  document.getElementById('error-msg').innerHTML =
-    `<strong>Não foi possível carregar os dados.</strong><br><br>` +
-    `Causa provável: a planilha não está publicada como CSV.<br><br>` +
-    `<b>Solução:</b><br>` +
-    `1. Abra a planilha no Google Sheets<br>` +
-    `2. Clique em <b>Arquivo → Compartilhar → Publicar na Web</b><br>` +
-    `3. Selecione a aba e o formato <b>CSV</b><br>` +
-    `4. Clique em <b>Publicar</b> e recarregue este dashboard`;
+  console.error('Todos os métodos falharam:', lastErr);
+  var msg = document.getElementById('error-msg');
+  if (msg) {
+    msg.innerHTML =
+      '<strong>Não foi possível carregar os dados.</strong><br><br>' +
+      'Último erro: ' + (lastErr ? lastErr.message : 'desconhecido') + '<br><br>' +
+      '<b>Como resolver:</b><br>' +
+      '1. Abra a planilha no Google Sheets<br>' +
+      '2. Clique em <b>Arquivo → Compartilhar → Publicar na Web</b><br>' +
+      '3. Selecione a aba <b>"Página1"</b> (ou a aba com os dados)<br>' +
+      '4. Formato: <b>Valores separados por vírgula (.csv)</b><br>' +
+      '5. Clique em <b>Publicar</b> → confirme<br>' +
+      '6. Volte aqui e clique em <b>Tentar Novamente</b>';
+  }
   showState('error');
-  btn.classList.remove('loading');
+  if (btn) btn.classList.remove('loading');
 }
 
 /* Fetch direto — sem proxy */
 async function fetchDirect(url) {
-  const res = await fetch(url, { mode: 'cors', cache: 'no-store' });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  var res = await fetch(url, { mode: 'cors', cache: 'no-store' });
+  if (!res.ok) throw new Error('HTTP ' + res.status);
   return res.text();
 }
 
 /* Fetch via proxy CORS */
 async function fetchViaProxy(proxyUrl) {
-  const res = await fetch(proxyUrl, { cache: 'no-store' });
-  if (!res.ok) throw new Error(`Proxy HTTP ${res.status}`);
+  var res = await fetch(proxyUrl, { cache: 'no-store' });
+  if (!res.ok) throw new Error('Proxy HTTP ' + res.status);
   return res.text();
 }
 
@@ -1757,9 +1790,12 @@ function renderInsights(stats, data) {
    ESTADOS DE TELA
    ============================================================ */
 function showState(state) {
-  document.getElementById('loading-state').style.display  = state==='loading' ? 'flex' : 'none';
-  document.getElementById('error-state').style.display    = state==='error'   ? 'flex' : 'none';
-  document.getElementById('dashboard-content').style.display = state==='dashboard' ? 'block' : 'none';
+  var ls = document.getElementById('loading-state');
+  var es = document.getElementById('error-state');
+  var dc = document.getElementById('dashboard-content');
+  if (ls) ls.style.display = state === 'loading'   ? 'flex'  : 'none';
+  if (es) es.style.display = state === 'error'     ? 'flex'  : 'none';
+  if (dc) dc.style.display = state === 'dashboard' ? 'block' : 'none';
 }
 
 /* ============================================================
