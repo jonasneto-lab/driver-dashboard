@@ -936,10 +936,13 @@ body::before {
   </div>
 
   <div id="error-state" class="state-overlay" style="display:none;">
-    <div class="state-icon error-icon">⚠</div>
+    <div class="state-icon error-icon" style="font-size:28px;">⚠</div>
     <div class="state-title">Falha ao carregar dados</div>
-    <div class="state-desc" id="error-msg">Verifique se o link CSV está correto e a planilha está publicada.</div>
-    <button class="btn-refresh" onclick="loadData()" style="margin-top:8px;">Tentar Novamente</button>
+    <div class="state-desc" id="error-msg" style="max-width:480px;text-align:left;background:rgba(239,68,68,0.07);border:1px solid rgba(239,68,68,0.2);border-radius:12px;padding:16px 20px;line-height:1.8;font-size:13px;"></div>
+    <button class="btn-refresh" onclick="loadData()" style="margin-top:16px;">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+      Tentar Novamente
+    </button>
   </div>
 
   <!-- ========================
@@ -1073,8 +1076,19 @@ body::before {
    3. Selecione a aba desejada e escolha "CSV"
    4. Copie o link gerado e cole abaixo em CSV_URL
    ============================================================ */
-const CSV_URL = "https://docs.google.com/spreadsheets/d/1Oh7ybO61WOojWhDfAWz5fSjI4Mi8XtSXSZlrudiXPuY/export?format=csv&gid=46220908";
+const SHEET_ID  = "1Oh7ybO61WOojWhDfAWz5fSjI4Mi8XtSXSZlrudiXPuY";
+const SHEET_GID = "46220908";
 /* ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ */
+
+// URL direta de export (funciona quando a planilha está publicada/pública)
+const CSV_URL = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&gid=${SHEET_GID}`;
+
+// Proxies CORS públicos — tentados em ordem até um funcionar
+const PROXIES = [
+  (u) => `https://corsproxy.io/?${encodeURIComponent(u)}`,
+  (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
+  (u) => `https://cors-anywhere.herokuapp.com/${u}`,
+];
 
 // Dados brutos e filtrados
 let rawData = [];
@@ -1088,29 +1102,73 @@ async function loadData() {
   btn.classList.add('loading');
   showState('loading');
 
-  try {
-    // Cache-bust para garantir dados frescos
-    const url = `${CSV_URL}&cachebust=${Date.now()}`;
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const text = await res.text();
+  const bust = `&cachebust=${Date.now()}`;
+  const directUrl = CSV_URL + bust;
 
-    rawData = parseCSV(text);
+  // Tenta primeiro direto (funciona quando está publicado como CSV no Sheets)
+  // Depois tenta cada proxy CORS em sequência
+  const attempts = [
+    () => fetchDirect(directUrl),
+    ...PROXIES.map(proxy => () => fetchViaProxy(proxy(directUrl)))
+  ];
 
-    if (rawData.length === 0) throw new Error('Nenhum dado válido encontrado no CSV.');
+  let lastErr = null;
+  for (const attempt of attempts) {
+    try {
+      const text = await attempt();
+      if (!text || text.trim().length < 10) continue;
 
-    populateFilters();
-    applyFilters();
-    showState('dashboard');
-    updateTimestamp();
+      // Verifica se veio HTML de login (planilha privada) em vez de CSV
+      if (text.trim().startsWith('<!DOCTYPE') || text.trim().startsWith('<html')) {
+        lastErr = new Error('A planilha está privada. Publique-a em: Arquivo → Compartilhar → Publicar na Web → CSV.');
+        continue;
+      }
 
-  } catch (err) {
-    console.error('Erro ao carregar dados:', err);
-    document.getElementById('error-msg').textContent = `${err.message} — Verifique o link CSV e as permissões da planilha.`;
-    showState('error');
-  } finally {
-    btn.classList.remove('loading');
+      rawData = parseCSV(text);
+      if (rawData.length === 0) {
+        lastErr = new Error('Nenhum dado válido encontrado. Verifique se a aba correta está publicada.');
+        continue;
+      }
+
+      populateFilters();
+      applyFilters();
+      showState('dashboard');
+      updateTimestamp();
+      btn.classList.remove('loading');
+      return; // sucesso!
+
+    } catch (err) {
+      lastErr = err;
+      // tenta próximo
+    }
   }
+
+  // Todos falharam
+  console.error('Todos os métodos de carregamento falharam:', lastErr);
+  document.getElementById('error-msg').innerHTML =
+    `<strong>Não foi possível carregar os dados.</strong><br><br>` +
+    `Causa provável: a planilha não está publicada como CSV.<br><br>` +
+    `<b>Solução:</b><br>` +
+    `1. Abra a planilha no Google Sheets<br>` +
+    `2. Clique em <b>Arquivo → Compartilhar → Publicar na Web</b><br>` +
+    `3. Selecione a aba e o formato <b>CSV</b><br>` +
+    `4. Clique em <b>Publicar</b> e recarregue este dashboard`;
+  showState('error');
+  btn.classList.remove('loading');
+}
+
+/* Fetch direto — sem proxy */
+async function fetchDirect(url) {
+  const res = await fetch(url, { mode: 'cors', cache: 'no-store' });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.text();
+}
+
+/* Fetch via proxy CORS */
+async function fetchViaProxy(proxyUrl) {
+  const res = await fetch(proxyUrl, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`Proxy HTTP ${res.status}`);
+  return res.text();
 }
 
 /* ============================================================
